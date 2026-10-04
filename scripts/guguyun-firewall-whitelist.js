@@ -1,13 +1,6 @@
 /*
  * 咕咕云腾讯云 ECS 防火墙自动加白
  * Surge
- *
- * token 通过 Surge 模块参数传入：
- * argument="tokens={{{tokens}}}"
- *
- * 支持：
- * ctecsfw_xxx@2
- * ctecsfw_xxx@2,ctecsfw_yyy@1
  */
 
 var API_BASE =
@@ -20,7 +13,6 @@ function getTokens() {
 
   var arg = String($argument);
 
-  // Surge 传入格式：tokens=xxx
   if (arg.indexOf("tokens=") === 0) {
     arg = arg.slice(7);
   }
@@ -44,12 +36,15 @@ function request(token) {
     $httpClient.get(
       {
         url: API_BASE + encodeURIComponent(token),
-        timeout: 15
+        timeout: 15,
+
+        // 只强制当前 API 请求直连
+        // 不影响 Surge 其他流量的代理策略
+        policy: "DIRECT"
       },
       function (error, response, body) {
         if (error) {
           resolve({
-            token: token,
             ok: false,
             message: String(error)
           });
@@ -59,15 +54,19 @@ function request(token) {
         var status =
           response && (response.status || response.statusCode);
 
-        var ok = status >= 200 && status < 300;
+        var ok =
+          typeof status === "number" &&
+          status >= 200 &&
+          status < 300;
+
+        var message =
+          body && String(body).trim()
+            ? String(body).trim()
+            : "HTTP " + status;
 
         resolve({
-          token: token,
           ok: ok,
-          message:
-            body && String(body).trim()
-              ? String(body).trim()
-              : "HTTP " + status
+          message: message
         });
       }
     );
@@ -85,9 +84,7 @@ if (tokens.length === 0) {
 
   $done({
     title: "咕咕云防火墙加白 ❌",
-    content: "未配置 Token",
-    icon: "exclamationmark.shield",
-    "icon-color": "#FF3B30"
+    content: "未配置 Token"
   });
 } else {
   Promise.all(
@@ -98,7 +95,9 @@ if (tokens.length === 0) {
     var okCount = 0;
 
     var lines = results.map(function (result, index) {
-      if (result.ok) okCount++;
+      if (result.ok) {
+        okCount++;
+      }
 
       return (
         "#" +
@@ -109,21 +108,13 @@ if (tokens.length === 0) {
       );
     });
 
-    var allOk = okCount === results.length;
-
     $done({
       title:
         "咕咕云防火墙加白 " +
         okCount +
         "/" +
         results.length,
-      content: lines.join("\n"),
-      icon: allOk
-        ? "checkmark.shield"
-        : "exclamationmark.shield",
-      "icon-color": allOk
-        ? "#34C759"
-        : "#FF3B30"
+      content: lines.join("\n")
     });
   });
 }
