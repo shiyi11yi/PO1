@@ -1,0 +1,17 @@
+#!name=咕咕云防火墙自动加白
+#!desc=自动将当前公网出口 IP 添加到腾讯云 ECS 防火墙白名单
+#!category=Firewall
+#!author=Eleven
+
+[Rule]
+DOMAIN,www.guguyun.com,DIRECT
+
+[Script]
+guguyun-fw-cron = type=cron,cronexp="*/10 * * * *",script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=30
+
+guguyun-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=30
+
+guguyun-fw-panel = type=generic,script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=30
+
+[Panel]
+guguyun-fw = script-name=guguyun-fw-panel,title=咕咕云防火墙加白,content=点击刷新,update-interval=300
