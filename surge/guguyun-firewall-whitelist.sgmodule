@@ -1,22 +1,23 @@
 
 #!name=咕咕云防火墙自动加白
-#!desc=查询官方固定槽位，与当前公网网段比较，变化后自动加白
+#!desc=网络切换自动检测公网IP，查询官方固定槽位，网段变化后自动加白
 #!category=Firewall
 #!author=Eleven
 #!arguments=tokens:""
-#!arguments-desc=tokens: 填写带槽位的 Token，例如 ctecsfw_xxx@2；多个用英文逗号分隔
+#!arguments-desc=tokens: 填写带固定槽位的Token，例如ctecsfw_xxx@2，多个用英文逗号分隔
 
 [Rule]
 DOMAIN,www.guguyun.com,DIRECT
 DOMAIN,ip.3322.net,DIRECT
-IP-CIDR,103.120.90.209/32,DIRECT,no-resolve
-
 
 [Script]
 guguyun-fw-cron = type=cron,cronexp="*/5 * * * *",script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=45,argument="tokens={{{tokens}}}"
+
 guguyun-fw-event = type=event,event-name=network-changed,script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=45,argument="tokens={{{tokens}}}"
+
+guguyun-fw-start = type=event,event-name=engine-started,script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=45,argument="tokens={{{tokens}}}"
+
 guguyun-fw-panel = type=generic,script-path=https://raw.githubusercontent.com/shiyi11yi/PO1/main/scripts/guguyun-firewall-whitelist.js,timeout=45,argument="tokens={{{tokens}}}"
 
 [Panel]
 guguyun-fw = script-name=guguyun-fw-panel,title=咕咕云防火墙加白,content=点击刷新,update-interval=300
-
