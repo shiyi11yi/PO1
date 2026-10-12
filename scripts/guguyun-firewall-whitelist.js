@@ -1,15 +1,11 @@
 
 /*
  * 咕咕云腾讯云 ECS 防火墙自动加白
- * Surge iOS
+ * Surge iOS - 网络切换诊断版
  *
- * 功能：
- * 1. 网络变化自动触发
- * 2. 网络未就绪自动重试
- * 3. 官方固定槽位网段比对
- * 4. 网段不一致才更新
- * 5. 多 Token、多固定槽位
- * 6. 手动面板、定时任务、引擎启动
+ * 官方槽位查询 + /24 网段比较
+ * 支持多 Token、多固定槽位
+ * Wi-Fi / 蜂窝网络切换自动检测
  */
 
 const BASE = "https://www.guguyun.com/cany_tencentecs/firewall/whitelist";
@@ -17,50 +13,54 @@ const IP_URL = "http://ip.3322.net";
 
 const RETRY_COUNT = 3;
 const RETRY_DELAY = 2000;
+const DEBUG = true;
 
 const sleep = ms =>
   new Promise(resolve => setTimeout(resolve, ms));
 
 // 读取模块参数
-function getTokens() {
-  if (typeof $argument === "undefined" || !$argument) {
-    return [];
-  }
+function getConfig() {
+  const raw = typeof $argument === "undefined"
+    ? "" : String($argument);
 
-  let raw = String($argument).replace(/^tokens=/, "");
+  const source = (
+    raw.match(/(?:^|&)source=([^&]*)/) || []
+  )[1] || "unknown";
+
+  let tokenText = (
+    raw.match(/(?:^|&)tokens=(.*)$/) || []
+  )[1] || "";
 
   try {
-    raw = decodeURIComponent(raw);
+    tokenText = decodeURIComponent(tokenText);
   } catch (_) {}
 
-  return [...new Set(
-    raw.split(/[,|;、\s]+/)
+  const tokens = [...new Set(
+    tokenText.split(/[,|;、\s]+/)
       .map(s => s.trim())
       .filter(s => /^ctecsfw_[A-Za-z0-9_-]+@[0-4]$/.test(s))
   )];
+
+  return { source, tokens };
 }
 
-// 获取触发方式
-function getTrigger() {
-  if (typeof $event !== "undefined" && $event) {
-    return $event.name || "event";
-  }
-
-  if (typeof $script !== "undefined" && $script) {
-    if ($script.type === "cron") return "cron";
-    if ($script.type === "generic") return "manual";
-  }
-
-  return "unknown";
+// 日志
+function log(message) {
+  console.log("[咕咕云] " + message);
 }
 
-// HTTP GET 强制直连
+// 通知
+function notify(title, subtitle, body) {
+  $notification.post(title, subtitle, body);
+}
+
+// HTTP GET，强制直连
 function httpGet(url) {
   return new Promise((resolve, reject) => {
     $httpClient.get({
       url,
-      timeout: 10,
       policy: "DIRECT",
+      timeout: 10,
       headers: {
         "Cache-Control": "no-cache",
         "Pragma": "no-cache"
@@ -72,10 +72,12 @@ function httpGet(url) {
       }
 
       const status = Number(
-        response && (response.status || response.statusCode)
+        response &&
+        (response.status || response.statusCode)
       );
 
-      if (status < 200 || status >= 300) {
+      if (!Number.isFinite(status) ||
+          status < 200 || status >= 300) {
         reject(new Error("HTTP " + status));
         return;
       }
@@ -85,28 +87,29 @@ function httpGet(url) {
   });
 }
 
-// API 响应校验
+// 咕咕云 API
 async function apiGet(url) {
   const body = await httpGet(url);
 
-  let data;
+  let result;
 
   try {
-    data = JSON.parse(body);
+    result = JSON.parse(body);
   } catch (_) {
-    throw new Error("接口返回的数据不是有效 JSON");
+    throw new Error("API 返回无效 JSON");
   }
 
-  if (Number(data.status) !== 200) {
-    throw new Error(data.msg || "API 请求失败");
+  if (Number(result.status) !== 200) {
+    throw new Error(result.msg || "API 请求失败");
   }
 
-  return data;
+  return result;
 }
 
-// 解析公网 IPv4
-function parseIPv4(ip) {
-  const parts = ip.trim().split(".");
+// IPv4 转换为 /24 网段
+function parseIPv4(value) {
+  const ip = String(value).trim();
+  const parts = ip.split(".");
 
   if (
     parts.length !== 4 ||
@@ -116,7 +119,7 @@ function parseIPv4(ip) {
       Number(p) <= 255
     )
   ) {
-    throw new Error("无效的公网 IPv4：" + ip);
+    throw new Error("无效公网 IPv4：" + ip);
   }
 
   return {
@@ -125,16 +128,17 @@ function parseIPv4(ip) {
   };
 }
 
-// 获取公网 IP，失败后重试
+// 获取当前公网 IP
 async function getPublicIP() {
   let lastError;
 
   for (let i = 0; i < RETRY_COUNT; i++) {
     try {
-      const ip = await httpGet(IP_URL);
-      return parseIPv4(ip);
+      const value = await httpGet(IP_URL);
+      return parseIPv4(value);
     } catch (e) {
       lastError = e;
+      log("公网 IP 检测失败，第 " + (i + 1) + " 次：" + e.message);
 
       if (i < RETRY_COUNT - 1) {
         await sleep(RETRY_DELAY);
@@ -145,13 +149,39 @@ async function getPublicIP() {
   throw lastError;
 }
 
-// 查询与更新指定固定槽位
+// 网络切换时确认新出口
+async function detectNetwork(source) {
+  if (source !== "network") {
+    return await getPublicIP();
+  }
+
+  // 等待 Wi-Fi / 蜂窝网络建立连接
+  await sleep(1500);
+
+  const first = await getPublicIP();
+  log("首次检测公网 IP：" + first.ip);
+
+  // 即使首次请求成功，也再次确认出口
+  await sleep(2500);
+
+  try {
+    const second = await getPublicIP();
+    log("二次检测公网 IP：" + second.ip);
+
+    return second;
+  } catch (e) {
+    log("二次检测失败：" + e.message);
+    throw e;
+  }
+}
+
+// 查询并更新固定槽位
 async function checkToken(token, cidr) {
   const index = token.lastIndexOf("@");
   const baseToken = token.slice(0, index);
   const slot = Number(token.slice(index + 1));
 
-  // 获取官方固定槽位
+  // 查询官方固定槽位
   const query = await apiGet(
     BASE + "/query?token=" +
     encodeURIComponent(baseToken)
@@ -160,7 +190,7 @@ async function checkToken(token, cidr) {
   const slots = query.data && query.data.fixed_slots;
 
   if (!Array.isArray(slots)) {
-    throw new Error("无法获取官方固定槽位");
+    throw new Error("官方固定槽位数据无效");
   }
 
   const item = slots.find(
@@ -173,89 +203,97 @@ async function checkToken(token, cidr) {
 
   const remote = item.cidr || "";
 
-  // 网段一致，不更新
+  log(
+    "槽位 " + slot +
+    "，官方：" + (remote || "空") +
+    "，当前：" + cidr
+  );
+
+  // 网段一致，无需更新
   if (remote === cidr) {
     return {
-      ok: true,
-      updated: false,
       slot,
+      updated: false,
       message: "槽位 " + slot + " 无变化：" + cidr
     };
   }
 
-  // 网段变化或为空，执行更新
+  // 网段变化，更新指定固定槽位
   const result = await apiGet(
     BASE + "?token=" + encodeURIComponent(token)
   );
 
   const data = result.data || {};
-  const updated = data.cidr || "";
+  const actualSlot = Number(data.slot);
+  const actualCidr = data.cidr || "";
 
-  // 校验实际写入的槽位与网段
-  if (Number(data.slot) !== slot) {
+  // 验证接口更新结果
+  if (actualSlot !== slot) {
     throw new Error(
-      "固定槽位不一致：预期 " + slot +
+      "槽位不一致：预期 " + slot +
       "，实际 " + data.slot
     );
   }
 
-  if (updated !== cidr) {
+  if (actualCidr !== cidr) {
     throw new Error(
-      "出口网段不一致：本地 " + cidr +
-      "，接口 " + updated
+      "出口不一致：本地 " + cidr +
+      "，接口 " + actualCidr
     );
   }
 
   return {
-    ok: true,
-    updated: true,
     slot,
-    message: "槽位 " + slot + " 已更新：" +
+    updated: true,
+    message: "槽位 " + slot +
+      " 已更新：" +
       (remote || "空") + " → " + cidr
   };
 }
 
-// 主流程
+// 主程序
 async function main() {
-  const trigger = getTrigger();
-  const tokens = getTokens();
+  const config = getConfig();
+  const source = config.source;
+  const tokens = config.tokens;
 
   const lines = [];
-  let updateCount = 0;
-  let successCount = 0;
+  let success = 0;
+  let updated = 0;
+
+  const isPanel = source === "panel";
+
+  // 脚本开始执行时立即记录
+  log("脚本已启动，触发方式：" + source);
+  log("有效 Token 数量：" + tokens.length);
+
+  // 调试模式：所有入口执行时都通知
+  if (DEBUG) {
+    notify(
+      "咕咕云脚本已执行",
+      "触发方式：" + source,
+      "正在检查公网 IP 和官方固定槽位"
+    );
+  }
 
   try {
     if (!tokens.length) {
       throw new Error(
-        "未配置有效 Token，请使用 ctecsfw_xxx@槽位"
+        "没有有效 Token，请填写 ctecsfw_xxx@槽位"
       );
     }
 
-    // 网络切换事件通知
-    if (trigger === "network-changed") {
-      console.log("咕咕云：检测到网络变化事件");
+    // 检测公网 IP
+    const network = await detectNetwork(source);
 
-      $notification.post(
-        "咕咕云网络切换检测",
-        "Surge 已检测到网络变化",
-        "正在检查新的公网 IP"
-      );
+    log("最终公网 IP：" + network.ip);
+    log("本地目标网段：" + network.cidr);
 
-      // 等待新网络就绪
-      await sleep(1500);
-    }
-
-    // 获取当前公网 IP
-    const network = await getPublicIP();
-
-    console.log(
-      "咕咕云：触发方式=" + trigger +
-      "，公网 IP=" + network.ip
-    );
-
-    // 逐个检查 Token
+    // 查询所有指定固定槽位
     for (const token of tokens) {
-      const slot = token.slice(token.lastIndexOf("@") + 1);
+      const slot = token.slice(
+        token.lastIndexOf("@") + 1
+      );
 
       try {
         const result = await checkToken(
@@ -263,12 +301,12 @@ async function main() {
           network.cidr
         );
 
-        successCount++;
+        success++;
 
         if (result.updated) {
-          updateCount++;
+          updated++;
 
-          $notification.post(
+          notify(
             "咕咕云白名单更新成功",
             "固定槽位 " + result.slot,
             result.message
@@ -276,15 +314,16 @@ async function main() {
         }
 
         lines.push("✅ " + result.message);
-        console.log(result.message);
+        log(result.message);
 
       } catch (e) {
-        const msg = "槽位 " + slot + " 更新失败：" + e.message;
+        const message =
+          "槽位 " + slot + " 失败：" + e.message;
 
-        lines.push("❌ " + msg);
-        console.log("咕咕云：" + msg);
+        lines.push("❌ " + message);
+        log(message);
 
-        $notification.post(
+        notify(
           "咕咕云白名单更新失败",
           "固定槽位 " + slot,
           e.message
@@ -294,36 +333,43 @@ async function main() {
 
     const content =
       "公网 IP：" + network.ip +
-      "\n触发方式：" + trigger +
+      "\n触发方式：" + source +
       "\n" + lines.join("\n");
 
-    console.log(
-      "咕咕云：成功 " +
-      successCount + "/" + tokens.length +
-      "，更新 " + updateCount
+    log(
+      "执行完成，成功 " + success +
+      "/" + tokens.length +
+      "，实际更新 " + updated
     );
 
-    $done({
-      title: "咕咕云防火墙加白 " +
-        successCount + "/" + tokens.length,
-      content
-    });
+    // 只有面板需要返回显示内容
+    if (isPanel) {
+      $done({
+        title: "咕咕云防火墙加白 " +
+          success + "/" + tokens.length,
+        content
+      });
+    } else {
+      $done();
+    }
 
   } catch (e) {
-    const msg = "检测失败：" + e.message;
+    log("检测失败：" + e.message);
 
-    console.log("咕咕云：" + msg);
-
-    $notification.post(
+    notify(
       "咕咕云防火墙加白失败",
-      "网络或配置异常",
+      "触发方式：" + source,
       e.message
     );
 
-    $done({
-      title: "咕咕云防火墙加白 ❌",
-      content: msg
-    });
+    if (isPanel) {
+      $done({
+        title: "咕咕云防火墙加白 ❌",
+        content: "检测失败：" + e.message
+      });
+    } else {
+      $done();
+    }
   }
 }
 
